@@ -1,3 +1,5 @@
 .env
-allegati_salvati
-allegati_email
+attachments_saved
+attachments_email
+address.txt
+contents_complets.txt
