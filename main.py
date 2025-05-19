@@ -65,6 +65,11 @@ def find_custom_label(mail, label_name):
                 return match.group(1)
     return None
 
+def sanitize_filename(filename):
+    # Rimuove caratteri non validi per Windows
+    filename = filename.replace('\r', '').replace('\n', ' ')
+    return re.sub(r'[<>:"/\\|?*]', '_', filename)
+
 # Funzione per scrivere i dati delle email e salvare gli allegati
 def process_and_save_email(msg, allegati_dir, address_set, contents):
     """
@@ -119,7 +124,8 @@ def process_and_save_email(msg, allegati_dir, address_set, contents):
                         filename = decoded_filename.decode(encoding or "utf-8")
                     except UnicodeDecodeError:
                         filename = decoded_filename.decode("latin-1")  # Tentativo con latin-1 se utf-8 fallisce
-                filepath = os.path.join(allegati_dir, filename)
+                safe_filename = sanitize_filename(filename)
+                filepath = os.path.join(allegati_dir, safe_filename)
                 with open(filepath, 'wb') as f:
                     f.write(part.get_payload(decode=True))
                 attachments_list.append(filename)
@@ -133,25 +139,36 @@ def backup_single_folder(callback):
     MAIL = os.getenv("MAIL")
     PASSWORD = os.getenv("PASSWORD")
 
-    # Cartella per salvare gli allegati
-    ALLEGATI_DIR = "attachments_email"
+    # Cartella principale per gli allegati
+    ALLEGATI_DIR = "attachments"
+    ADDRESS_DIR = "address"
     if not os.path.exists(ALLEGATI_DIR):
         os.makedirs(ALLEGATI_DIR)
+    if not os.path.exists(ADDRESS_DIR):
+        os.makedirs(ADDRESS_DIR)
 
     # Connessione
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(MAIL, PASSWORD)
 
-    # Trova e seleziona la cartella Inviati
-    dir_to_find = callback(mail)
-    if not dir_to_find:
-        print("❌ ERRORE: Nessuna cartella Inviati trovata.")
-        exit()
+    # Trova e seleziona la cartella
+    folder_name = callback(mail)
+    if not folder_name:
+        print(f"❌ ERRORE: Impossibile trovare la cartella per la funzione {callback.__name__}.")
+        mail.logout()
+        return
 
-    status, _ = mail.select(f'"{dir_to_find}"')
+    status, _ = mail.select(f'"{folder_name}"')
     if status != "OK":
-        print(f"❌ ERRORE: Impossibile selezionare la cartella {dir_to_find}.")
-        exit()
+        print(f"❌ ERRORE: Impossibile selezionare la cartella {folder_name}.")
+        mail.logout()
+        return
+
+    # Crea una sottocartella specifica per questa cartella di posta
+    folder_safe_name = re.sub(r'[^\w\s-]', '', folder_name).strip()  # Rimuove caratteri non alfanumerici
+    allegati_dir = os.path.join(ALLEGATI_DIR, folder_safe_name)
+    if not os.path.exists(allegati_dir):
+        os.makedirs(allegati_dir)
 
     # Cerca tutte le email
     status, messages = mail.search(None, "ALL")
@@ -162,22 +179,25 @@ def backup_single_folder(callback):
     contents = []
 
     for email_id in email_ids:
+        print(f"Processing mail id: {email_id}")
         res, msg_data = mail.fetch(email_id, "(RFC822)")
         for response_part in msg_data:
             if isinstance(response_part, tuple):
                 msg = email.message_from_bytes(response_part[1])
-                process_and_save_email(msg, ALLEGATI_DIR, address_set, contents) # Usa la funzione
+                process_and_save_email(msg, allegati_dir, address_set, contents) # Usa la funzione
 
-    # Scrivi i file
-    with open("address.txt", "w", encoding="utf-8") as f:
+    # Scrivi i file (ora con nomi più specifici per la cartella)
+    with open(f"{ADDRESS_DIR}/{folder_safe_name}.txt", "w", encoding="utf-8") as f:
         for email_addr in sorted(address_set):
             f.write(email_addr + "\n")
 
-    with open("contents_complets.txt", "w", encoding="utf-8") as f:
+    with open(f"{ADDRESS_DIR}/contents_complets_{folder_safe_name}.txt", "w", encoding="utf-8") as f:
         f.writelines(contents)
 
-    print(f"✅ Completato! File generati: 'indirizzi.txt', 'contents_complets.txt' e salvati gli allegati nella cartella '{ALLEGATI_DIR}'")
+    print(f"✅ Completato il backup della cartella '{folder_name}'. File generati: 'indirizzi_{folder_safe_name}.txt', 'contents_complets_{folder_safe_name}.txt' e allegati salvati in '{allegati_dir}'")
+    mail.logout()
 
 if __name__ == "__main__":
-    backup_single_folder(find_drafts)
-    
+    list_callback_find = [find_inbox, find_sent, find_drafts, find_trash, find_all_mail, find_spam]
+    for callback in list_callback_find: 
+        backup_single_folder(callback)
