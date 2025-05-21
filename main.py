@@ -101,7 +101,10 @@ def process_and_save_email(msg, attachments_dir, address_set, contents):
     # Oggetto
     subject, encoding = decode_header(msg.get("Subject", ""))[0]
     if isinstance(subject, bytes):
-        subject = subject.decode(encoding or "utf-8", errors="ignore")
+        try:
+            subject = subject.decode(encoding or "utf-8")
+        except (UnicodeDecodeError, LookupError):
+            subject = subject.decode("utf-8", errors="replace")
 
     # Corpo
     body = ""
@@ -111,16 +114,34 @@ def process_and_save_email(msg, attachments_dir, address_set, contents):
             disp = str(part.get("Content-Disposition"))
             if ctype == "text/plain" and "attachment" not in disp:
                 charset = part.get_content_charset()
-                body = part.get_payload(decode=True).decode(charset or "utf-8", errors="ignore")
+                try:
+                    body = part.get_payload(decode=True).decode(charset or "utf-8")
+                except (UnicodeDecodeError, LookupError):
+                    body = part.get_payload(decode=True).decode("utf-8", errors="replace")
                 break
             elif ctype == "text/html" and "attachment" not in disp:
                 charset = part.get_content_charset()
                 html = part.get_payload(decode=True).decode(charset or "utf-8", errors="ignore")
                 soup = BeautifulSoup(html, "html.parser")
-                body = soup.get_text()
+                # Rimuove script, style e immagini da tracking
+                for tag in soup(["script", "style", "noscript", "img"]):
+                    tag.decompose()
+
+                # Pulizia del testo leggibile
+                text_blocks = []
+                for tag in soup.find_all(["h1", "h2", "h3", "p", "li", "a", "div", "span"]):
+                    text = tag.get_text(strip=True)
+                    if text:
+                        text_blocks.append(text)
+
+                # Unione in un corpo coerente
+                body = "\n".join(text_blocks)
                 break
     else:
-        body = msg.get_payload(decode=True).decode(errors="ignore")
+        try:
+            body = msg.get_payload(decode=True).decode("utf-8")
+        except (UnicodeDecodeError, LookupError):
+            body = msg.get_payload(decode=True).decode("utf-8", errors="replace")
 
     # Allegati
     attachments_list = []
@@ -140,7 +161,6 @@ def process_and_save_email(msg, attachments_dir, address_set, contents):
                 if payload:
                     with open(filepath, 'wb') as f:
                         f.write(payload)
-                    attachments_list.append(filename)
                 else:
                     print(f"⚠️  Payload vuoto per allegato '{filename}' — email soggetto: '{subject}'")
                 attachments_list.append(filename)
@@ -234,14 +254,7 @@ if __name__ == "__main__":
     for callback in list_callback_find: 
         backup_single_folder(callback)
 
-    if len(error_list) > 0:
-        print("\n--- Lista di errori riscontrati ---")
-        for i, err_details in enumerate(error_list):
-            print(f"\nErrore #{i+1}:")
-            print(f"  Tipo: {err_details.get('name', 'N/D')}")
-            print(f"  Messaggio: {err_details.get('message', 'N/D')}")
-
-            if err_details.get('stack_trace'):
-                print("  Stack Trace:")
-                print(err_details['stack_trace'].strip())
-            print("-----------------------------------")
+    if error_list:
+        with open("log_errors.txt", "w", encoding="utf-8") as f:
+            for i, err in enumerate(error_list):
+                f.write(f"Errore #{i+1}\nTipo: {err['name']}\nMessaggio: {err['message']}\n{err['stack_trace']}\n{'-'*80}\n")
