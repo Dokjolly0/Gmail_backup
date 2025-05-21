@@ -1,4 +1,5 @@
 import imaplib
+import traceback
 import email
 from email.header import decode_header
 import os
@@ -7,6 +8,7 @@ import re
 from bs4 import BeautifulSoup
 
 load_dotenv()
+error_list = []
 
 # Trova automaticamente la cartella Trash/Cestino
 def find_recycle_bin(mail):
@@ -71,13 +73,13 @@ def sanitize_filename(filename):
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
 # Funzione per scrivere i dati delle email e salvare gli allegati
-def process_and_save_email(msg, allegati_dir, address_set, contents):
+def process_and_save_email(msg, attachments_dir, address_set, contents):
     """
     Processa una singola email, estrae informazioni e salva gli allegati.
 
     Args:
         msg: L'oggetto email.Message da processare.
-        allegati_dir: La directory dove salvare gli allegati.
+        attachments_dir: La directory dove salvare gli allegati.
         address_set: Il set per memorizzare gli indirizzi email unici.
         contents: La lista per memorizzare il contenuto completo delle email.
     """
@@ -85,8 +87,16 @@ def process_and_save_email(msg, allegati_dir, address_set, contents):
     from_ = msg.get("From", "")
     to_ = msg.get("To", "")
     cc_ = msg.get("Cc", "")
-    indirizzi = re.findall(r'[\w\.-]+@[\w\.-]+', from_ + to_ + cc_)
-    address_set.update(indirizzi)
+    try:
+        indirizzi = re.findall(r'[\w\.-]+@[\w\.-]+', from_ + to_ + cc_)
+        address_set.update(indirizzi)
+    except Exception as err:
+        error_details = {
+            "name": type(err).__name__,
+            "message": str(err),
+            "stack_trace": traceback.format_exc()
+        }
+        error_list.append(error_details)
 
     # Oggetto
     subject, encoding = decode_header(msg.get("Subject", ""))[0]
@@ -125,13 +135,32 @@ def process_and_save_email(msg, allegati_dir, address_set, contents):
                     except UnicodeDecodeError:
                         filename = decoded_filename.decode("latin-1")  # Tentativo con latin-1 se utf-8 fallisce
                 safe_filename = sanitize_filename(filename)
-                filepath = os.path.join(allegati_dir, safe_filename)
-                with open(filepath, 'wb') as f:
-                    f.write(part.get_payload(decode=True))
+                filepath = os.path.join(attachments_dir, safe_filename)
+                payload = part.get_payload(decode=True)
+                if payload:
+                    with open(filepath, 'wb') as f:
+                        f.write(payload)
+                    attachments_list.append(filename)
+                else:
+                    print(f"⚠️  Payload vuoto per allegato '{filename}' — email soggetto: '{subject}'")
                 attachments_list.append(filename)
 
     # Costruisci contenuto completo
-    email_text = f"From: {from_}\nTo: {to_}\nCc: {cc_}\nSubject: {subject}\n\nBody:\n{body.strip()}\n\nAllegati: {', '.join(attachments_list)}\n{'=' * 80}\n"
+    email_text = (
+        f"{'='*100}\n"
+        f"📧 NUOVA EMAIL\n"
+        f"{'-'*100}\n"
+        f"📤 Da      : {from_}\n"
+        f"📥 A       : {to_}\n"
+        f"👥 Cc      : {cc_}\n"
+        f"📝 Oggetto : {subject}\n"
+        f"{'-'*100}\n"
+        f"🧾 Corpo del messaggio:\n\n"
+        f"{body.strip()}\n\n"
+        f"{'-'*100}\n"
+        f"📎 Allegati: {', '.join(attachments_list) if attachments_list else 'Nessuno'}\n"
+        f"{'='*100}\n\n"
+    )
     contents.append(email_text)
 
 def backup_single_folder(callback):
@@ -140,12 +169,15 @@ def backup_single_folder(callback):
     PASSWORD = os.getenv("PASSWORD")
 
     # Cartella principale per gli allegati
-    ALLEGATI_DIR = "attachments"
+    ATTACHMENTS_DIR = "attachments"
     ADDRESS_DIR = "address"
-    if not os.path.exists(ALLEGATI_DIR):
-        os.makedirs(ALLEGATI_DIR)
+    CONTENTS_COMPLETES = "contents_complets"
+    if not os.path.exists(ATTACHMENTS_DIR):
+        os.makedirs(ATTACHMENTS_DIR)
     if not os.path.exists(ADDRESS_DIR):
         os.makedirs(ADDRESS_DIR)
+    if not os.path.exists(CONTENTS_COMPLETES):
+        os.makedirs(CONTENTS_COMPLETES)
 
     # Connessione
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -166,9 +198,9 @@ def backup_single_folder(callback):
 
     # Crea una sottocartella specifica per questa cartella di posta
     folder_safe_name = re.sub(r'[^\w\s-]', '', folder_name).strip()  # Rimuove caratteri non alfanumerici
-    allegati_dir = os.path.join(ALLEGATI_DIR, folder_safe_name)
-    if not os.path.exists(allegati_dir):
-        os.makedirs(allegati_dir)
+    attachments_dir = os.path.join(ATTACHMENTS_DIR, folder_safe_name)
+    if not os.path.exists(attachments_dir):
+        os.makedirs(attachments_dir)
 
     # Cerca tutte le email
     status, messages = mail.search(None, "ALL")
@@ -184,20 +216,32 @@ def backup_single_folder(callback):
         for response_part in msg_data:
             if isinstance(response_part, tuple):
                 msg = email.message_from_bytes(response_part[1])
-                process_and_save_email(msg, allegati_dir, address_set, contents) # Usa la funzione
+                process_and_save_email(msg, attachments_dir, address_set, contents) # Usa la funzione
 
     # Scrivi i file (ora con nomi più specifici per la cartella)
     with open(f"{ADDRESS_DIR}/{folder_safe_name}.txt", "w", encoding="utf-8") as f:
         for email_addr in sorted(address_set):
             f.write(email_addr + "\n")
 
-    with open(f"{ADDRESS_DIR}/contents_complets_{folder_safe_name}.txt", "w", encoding="utf-8") as f:
+    with open(f"{CONTENTS_COMPLETES}/{folder_safe_name}.txt", "w", encoding="utf-8") as f:
         f.writelines(contents)
 
-    print(f"✅ Completato il backup della cartella '{folder_name}'. File generati: 'indirizzi_{folder_safe_name}.txt', 'contents_complets_{folder_safe_name}.txt' e allegati salvati in '{allegati_dir}'")
+    print(f"✅ Completato il backup della cartella '{folder_name}'. File generati: 'indirizzi_{folder_safe_name}.txt', 'contents_complets_{folder_safe_name}.txt' e allegati salvati in '{attachments_dir}'")
     mail.logout()
 
 if __name__ == "__main__":
     list_callback_find = [find_inbox, find_sent, find_drafts, find_trash, find_all_mail, find_spam]
     for callback in list_callback_find: 
         backup_single_folder(callback)
+
+    if len(error_list) > 0:
+        print("\n--- Lista di errori riscontrati ---")
+        for i, err_details in enumerate(error_list):
+            print(f"\nErrore #{i+1}:")
+            print(f"  Tipo: {err_details.get('name', 'N/D')}")
+            print(f"  Messaggio: {err_details.get('message', 'N/D')}")
+
+            if err_details.get('stack_trace'):
+                print("  Stack Trace:")
+                print(err_details['stack_trace'].strip())
+            print("-----------------------------------")
